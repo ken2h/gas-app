@@ -1,16 +1,136 @@
 <!DOCTYPE html>
 <html lang="ja">
 <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>GASアプリ表示</title>
-    <style>
-        /* 画面いっぱいに表示するための設定 */
-        body, html { margin: 0; padding: 0; height: 100%; overflow: hidden; }
-        iframe { width: 100%; height: 100vh; border: none; }
-    </style>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>業務管理システム</title>
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; }
+  body { font-family: -apple-system, "Segoe UI", "Hiragino Kaku Gothic ProN", Meiryo, sans-serif; background: #f8f9fa; }
+  #app-frame { width: 100%; height: 100vh; border: none; display: block; }
+  #login { max-width: 360px; margin: 0 auto; padding: 80px 20px 0; }
+  .card { background: #fff; padding: 32px 24px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); text-align: center; }
+  .card h3 { margin: 0 0 8px; }
+  .card p { color: #666; font-size: 14px; margin: 0 0 20px; }
+  .msg { color: #d93025; font-size: 13px; min-height: 18px; margin-bottom: 12px; }
+  .login-btn { width: 100%; padding: 12px; font-size: 16px; border: none; border-radius: 6px; background: #1a73e8; color: #fff; cursor: pointer; }
+  .login-btn:active { background: #1558b0; }
+</style>
 </head>
 <body>
-    <iframe src="https://script.google.com/macros/s/AKfycbxyZUdN7H4_u1tTWGvza1mh2i2iKPaGzWZq7X7syZPU0TmZErPnNfy9sxRmsHL4Y_Ol/exec"></iframe>
+<script>
+  var CLIENT_ID    = '1026254309160-3milkdp5ju4d7g935j3e4e9kes4j0fr3.apps.googleusercontent.com';
+  var GAS_EXEC     = 'https://script.google.com/macros/s/AKfycbxyZUdN7H4_u1tTWGvza1mh2i2iKPaGzWZq7X7syZPU0TmZErPnNfy9sxRmsHL4Y_Ol/exec';
+  var REDIRECT_URI = 'https://ken2h.github.io/gas-app/';
+  var TOKEN_KEY    = 'app_id_token';
+  var NONCE_KEY    = 'app_login_nonce';
+
+  function parseHash() {
+    var h = location.hash.charAt(0) === '#' ? location.hash.slice(1) : location.hash;
+    return new URLSearchParams(h);
+  }
+
+  function decodeJwtPayload(jwt) {
+    var p = jwt.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+    while (p.length % 4) p += '=';
+    return JSON.parse(decodeURIComponent(escape(atob(p))));
+  }
+
+  function isExpired(jwt) {
+    try {
+      var exp = decodeJwtPayload(jwt).exp;
+      return !exp || (Number(exp) * 1000 < Date.now() + 10000);
+    } catch (e) { return true; }
+  }
+
+  function showApp(token) {
+    document.body.innerHTML = '';
+    var f = document.createElement('iframe');
+    f.id = 'app-frame';
+    f.src = GAS_EXEC + '?token=' + encodeURIComponent(token);
+    document.body.appendChild(f);
+  }
+
+  function showLogin(message) {
+    document.body.innerHTML =
+      '<div id="login"><div class="card">' +
+        '<h3>業務管理システム</h3>' +
+        '<p>Googleアカウントでログインしてください</p>' +
+        '<div class="msg"></div>' +
+        '<button type="button" class="login-btn">Googleでログイン</button>' +
+      '</div></div>';
+    document.querySelector('.msg').textContent = message || '';
+    document.querySelector('.login-btn').addEventListener('click', startLogin);
+  }
+
+  function startLogin() {
+    var nonce = Date.now().toString(36) + Math.random().toString(36).slice(2);
+    try { sessionStorage.setItem(NONCE_KEY, nonce); } catch (e) {}
+    var url = 'https://accounts.google.com/o/oauth2/v2/auth'
+      + '?client_id=' + encodeURIComponent(CLIENT_ID)
+      + '&redirect_uri=' + encodeURIComponent(REDIRECT_URI)
+      + '&response_type=id_token'
+      + '&scope=' + encodeURIComponent('openid email profile')
+      + '&nonce=' + encodeURIComponent(nonce)
+      + '&prompt=select_account';
+    location.href = url;
+  }
+
+  function clearToken() {
+    try { localStorage.removeItem(TOKEN_KEY); } catch (e) {}
+  }
+
+  // GASアプリ(iframe)からのログアウト／期限切れ通知を受ける
+  window.addEventListener('message', function(ev) {
+    if (!ev.data || typeof ev.data !== 'object') return;
+    if (ev.data.type === 'app-logout') {
+      clearToken();
+      showLogin('');
+    } else if (ev.data.type === 'app-auth-expired') {
+      clearToken();
+      showLogin('セッションの有効期限が切れました。再度ログインしてください。');
+    }
+  });
+
+  (function init() {
+    var params = parseHash();
+    var idToken = params.get('id_token');
+    var err = params.get('error');
+
+    if (idToken) {
+      // Googleから戻ってきた
+      var savedNonce = null;
+      try { savedNonce = sessionStorage.getItem(NONCE_KEY); sessionStorage.removeItem(NONCE_KEY); } catch (e) {}
+      history.replaceState(null, '', REDIRECT_URI);  // URLからトークンを除去
+      var ok = false;
+      try {
+        var payload = decodeJwtPayload(idToken);
+        ok = !!savedNonce && payload.nonce === savedNonce && payload.aud === CLIENT_ID && !isExpired(idToken);
+      } catch (e) { ok = false; }
+      if (!ok) {
+        showLogin('ログイン情報の検証に失敗しました。もう一度お試しください。');
+        return;
+      }
+      try { localStorage.setItem(TOKEN_KEY, idToken); } catch (e) {}
+      showApp(idToken);
+      return;
+    }
+
+    if (err) {
+      showLogin('ログインがキャンセルされました。');
+      return;
+    }
+
+    // 保存済みトークンがあれば再利用（サーバ側で再検証される）
+    var saved = null;
+    try { saved = localStorage.getItem(TOKEN_KEY); } catch (e) {}
+    if (saved && !isExpired(saved)) {
+      showApp(saved);
+    } else {
+      clearToken();
+      showLogin('');
+    }
+  })();
+</script>
 </body>
 </html>
