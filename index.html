@@ -15,18 +15,33 @@
   .msg { color: #d93025; font-size: 13px; min-height: 18px; margin-bottom: 12px; }
   .login-btn { width: 100%; padding: 12px; font-size: 16px; border: none; border-radius: 6px; background: #1a73e8; color: #fff; cursor: pointer; }
   .login-btn:active { background: #1558b0; }
+  #splash { max-width: 360px; margin: 0 auto; padding: 100px 20px 0; text-align: center; color: #666; font-size: 14px; }
 </style>
 </head>
 <body>
 <script>
-  var CLIENT_ID        = '1026254309160-3milkdp5ju4d7g935j3e4e9kes4j0fr3.apps.googleusercontent.com';
-  var GAS_EXEC         = 'https://script.google.com/macros/s/AKfycbxyZUdN7H4_u1tTWGvza1mh2i2iKPaGzWZq7X7syZPU0TmZErPnNfy9sxRmsHL4Y_Ol/exec';
-  var REDIRECT_URI     = 'https://ken2h.github.io/gas-app/';
-  var TOKEN_KEY        = 'app_id_token';
-  var NONCE_KEY        = 'app_login_nonce';
-  var REAUTH_NONCE_KEY = 'app_reauth_nonce'; // 再認証専用ノンス（localStorageで親子共有）
+  // ── 認証フロー ────────────────────────────────────────────────
+  // ・初回 / セッション完全失効 … prompt=select_account でアカウント選択
+  // ・トークンだけ失効（Googleログインは生きている）
+  //     … prompt=none の全画面リダイレクトで「無操作」更新
+  // ・iframe からの app-auth-expired、および失効2分前のタイマーで
+  //   先回りしてサイレント更新する
+  // ・直近 SILENT_COOLDOWN 内に戻ってきたら無限ループ回避で手動ログインへ
+  var CLIENT_ID       = '1026254309160-3milkdp5ju4d7g935j3e4e9kes4j0fr3.apps.googleusercontent.com';
+  var GAS_EXEC        = 'https://script.google.com/macros/s/AKfycbxyZUdN7H4_u1tTWGvza1mh2i2iKPaGzWZq7X7syZPU0TmZErPnNfy9sxRmsHL4Y_Ol/exec';
+  var REDIRECT_URI    = 'https://ken2h.github.io/gas-app/';
+  var TOKEN_KEY       = 'app_id_token';
+  var NONCE_KEY       = 'app_login_nonce';  // sessionStorage: 認証リダイレクトのnonce
+  var SILENT_AT_KEY   = 'app_silent_at';    // sessionStorage: 直近のサイレント更新時刻
+  var SILENT_COOLDOWN = 60000;              // この時間内に戻ってきたらサイレント更新は断念
 
-  var _appFrame = null; // 表示中のiframe参照（再認証後にpostMessage送信に使う）
+  // Google がサイレント認証を断ったときに返すエラー（＝ユーザー操作が必要）
+  var INTERACTIVE_ERRORS = [
+    'login_required', 'consent_required',
+    'interaction_required', 'account_selection_required'
+  ];
+
+  var _refreshTimer = null; // 失効前の先回り更新タイマー
 
   function parseHash() {
     var h = location.hash.charAt(0) === '#' ? location.hash.slice(1) : location.hash;
@@ -46,17 +61,90 @@
     } catch (e) { return true; }
   }
 
+  function savedToken() {
+    try { return localStorage.getItem(TOKEN_KEY); } catch (e) { return null; }
+  }
+
+  function savedEmail() {
+    var t = savedToken();
+    if (!t) return '';
+    try { return decodeJwtPayload(t).email || ''; } catch (e) { return ''; }
+  }
+
+  function clearToken() {
+    try { localStorage.removeItem(TOKEN_KEY); } catch (e) {}
+  }
+
+  function lastSilentAt() {
+    try { return Number(sessionStorage.getItem(SILENT_AT_KEY)) || 0; } catch (e) { return 0; }
+  }
+
+  function silentOnCooldown() {
+    return Date.now() - lastSilentAt() < SILENT_COOLDOWN;
+  }
+
+  function buildAuthUrl(nonce, prompt, loginHint) {
+    var url = 'https://accounts.google.com/o/oauth2/v2/auth'
+      + '?client_id=' + encodeURIComponent(CLIENT_ID)
+      + '&redirect_uri=' + encodeURIComponent(REDIRECT_URI)
+      + '&response_type=id_token'
+      + '&scope=' + encodeURIComponent('openid email profile')
+      + '&nonce=' + encodeURIComponent(nonce)
+      + '&prompt=' + encodeURIComponent(prompt);
+    if (loginHint) url += '&login_hint=' + encodeURIComponent(loginHint);
+    return url;
+  }
+
+  // トップ画面ごと Google 認証へ遷移する
+  //   prompt='none'           … 画面を出さず更新（Googleログインが生きていれば即戻る）
+  //   prompt='select_account' … アカウント選択画面を出す（手動ログイン）
+  function redirectToAuth(prompt, loginHint) {
+    var nonce = Date.now().toString(36) + Math.random().toString(36).slice(2);
+    try { sessionStorage.setItem(NONCE_KEY, nonce); } catch (e) {}
+    if (prompt === 'none') {
+      try { sessionStorage.setItem(SILENT_AT_KEY, String(Date.now())); } catch (e) {}
+    }
+    location.href = buildAuthUrl(nonce, prompt, loginHint);
+  }
+
+  // 失効しているが Google ログインは生きていそうな場合のサイレント更新
+  function trySilentRefresh() {
+    if (silentOnCooldown()) {
+      // 直前に試して戻ってきたばかり＝サイレントでは無理 → 手動ログインへ
+      clearToken();
+      showLogin('');
+      return;
+    }
+    showSplash('セッションを更新しています…');
+    redirectToAuth('none', savedEmail());
+  }
+
+  function showSplash(text) {
+    if (_refreshTimer) { clearTimeout(_refreshTimer); _refreshTimer = null; }
+    document.body.innerHTML = '<div id="splash">' + (text || '読み込んでいます…') + '</div>';
+  }
+
   function showApp(token) {
+    if (_refreshTimer) { clearTimeout(_refreshTimer); _refreshTimer = null; }
     document.body.innerHTML = '';
     var f = document.createElement('iframe');
     f.id = 'app-frame';
     f.src = GAS_EXEC + '?token=' + encodeURIComponent(token);
     document.body.appendChild(f);
-    _appFrame = f;
+
+    // 失効2分前に先回りでサイレント更新（iframe のオーバーレイが出る前に処理する）
+    try {
+      var exp = Number(decodeJwtPayload(token).exp) * 1000;
+      var fireIn = exp - Date.now() - 2 * 60 * 1000;
+      if (fireIn < 0) fireIn = 0;
+      if (fireIn <= 2147483647) {
+        _refreshTimer = setTimeout(trySilentRefresh, fireIn);
+      }
+    } catch (e) {}
   }
 
   function showLogin(message) {
-    _appFrame = null;
+    if (_refreshTimer) { clearTimeout(_refreshTimer); _refreshTimer = null; }
     document.body.innerHTML =
       '<div id="login"><div class="card">' +
         '<h3>業務管理システム</h3>' +
@@ -65,132 +153,80 @@
         '<button type="button" class="login-btn">Googleでログイン</button>' +
       '</div></div>';
     document.querySelector('.msg').textContent = message || '';
-    document.querySelector('.login-btn').addEventListener('click', startLogin);
+    document.querySelector('.login-btn').addEventListener('click', function () {
+      redirectToAuth('select_account', null);
+    });
   }
 
-  function startLogin() {
-    var nonce = Date.now().toString(36) + Math.random().toString(36).slice(2);
-    try { sessionStorage.setItem(NONCE_KEY, nonce); } catch (e) {}
-    var url = buildAuthUrl(nonce, 'select_account');
-    location.href = url;
-  }
-
-  // セッション切れ時の再認証：iframeを維持したままポップアップで再認証
-  function startReauth() {
-    var nonce = Date.now().toString(36) + Math.random().toString(36).slice(2);
-    try { localStorage.setItem(REAUTH_NONCE_KEY, nonce); } catch (e) {}
-    var url = buildAuthUrl(nonce, 'select_account');
-    var popup = window.open(url, 'reauth_popup', 'width=520,height=620,left=200,top=100');
-    if (!popup) {
-      // ポップアップがブロックされた場合はフルページログインにフォールバック
-      clearToken();
-      showLogin('ポップアップがブロックされました。再度ログインしてください。');
-    }
-  }
-
-  // 再認証完了時にポップアップから呼ばれる
-  window.onReauthComplete = function(newToken) {
-    if (!newToken) {
-      // 再認証失敗 → ログイン画面に戻す
-      clearToken();
-      showLogin('再ログインに失敗しました。もう一度お試しください。');
-      return;
-    }
-    try { localStorage.setItem(TOKEN_KEY, newToken); } catch (e) {}
-    // iframeに新トークンを送信してオーバーレイを解除させる
-    if (_appFrame && _appFrame.contentWindow) {
-      _appFrame.contentWindow.postMessage(
-        { type: 'auth-token-refresh', token: newToken },
-        'https://script.google.com'
-      );
-    }
-  };
-
-  function buildAuthUrl(nonce, prompt) {
-    return 'https://accounts.google.com/o/oauth2/v2/auth'
-      + '?client_id=' + encodeURIComponent(CLIENT_ID)
-      + '&redirect_uri=' + encodeURIComponent(REDIRECT_URI)
-      + '&response_type=id_token'
-      + '&scope=' + encodeURIComponent('openid email profile')
-      + '&nonce=' + encodeURIComponent(nonce)
-      + '&prompt=' + encodeURIComponent(prompt);
-  }
-
-  function clearToken() {
-    try { localStorage.removeItem(TOKEN_KEY); } catch (e) {}
-  }
-
-  // GASアプリ(iframe)からのメッセージを受け取る
-  window.addEventListener('message', function(ev) {
+  // GASアプリ(iframe)からのメッセージ
+  window.addEventListener('message', function (ev) {
     if (!ev.data || typeof ev.data !== 'object') return;
+
     if (ev.data.type === 'app-logout') {
       clearToken();
       showLogin('');
-    } else if (ev.data.type === 'app-auth-expired') {
-      // iframeを破壊せずポップアップで再認証
-      startReauth();
+      return;
+    }
+
+    if (ev.data.type === 'app-auth-expired') {
+      // 先回りタイマーが間に合わなかった場合の保険。サイレント更新を試みる。
+      trySilentRefresh();
     }
   });
 
   (function init() {
-    var params = parseHash();
+    var params  = parseHash();
     var idToken = params.get('id_token');
-    var err = params.get('error');
+    var err     = params.get('error');
 
+    // ── Google認証から戻ってきた：トークンあり ──────────────────
     if (idToken) {
       history.replaceState(null, '', REDIRECT_URI); // URLからトークンを除去
-
-      // ── ポップアップとして動いている場合 ──────────────────────
-      if (window.opener && !window.opener.closed && typeof window.opener.onReauthComplete === 'function') {
-        var reauthNonce = null;
-        try { reauthNonce = localStorage.getItem(REAUTH_NONCE_KEY); localStorage.removeItem(REAUTH_NONCE_KEY); } catch (e) {}
-        var ok = false;
-        try {
-          var payload = decodeJwtPayload(idToken);
-          ok = !!reauthNonce && payload.nonce === reauthNonce && payload.aud === CLIENT_ID && !isExpired(idToken);
-        } catch (e) { ok = false; }
-        window.opener.onReauthComplete(ok ? idToken : null);
-        window.close();
-        return;
-      }
-
-      // ── 通常のログインフロー ───────────────────────────────────
       var savedNonce = null;
       try { savedNonce = sessionStorage.getItem(NONCE_KEY); sessionStorage.removeItem(NONCE_KEY); } catch (e) {}
       var ok = false;
       try {
         var payload = decodeJwtPayload(idToken);
-        ok = !!savedNonce && payload.nonce === savedNonce && payload.aud === CLIENT_ID && !isExpired(idToken);
+        ok = !!savedNonce && payload.nonce === savedNonce
+             && payload.aud === CLIENT_ID && !isExpired(idToken);
       } catch (e) { ok = false; }
-      if (!ok) {
+
+      if (ok) {
+        try { localStorage.setItem(TOKEN_KEY, idToken); } catch (e) {}
+        showApp(idToken);
+      } else {
+        clearToken();
         showLogin('ログイン情報の検証に失敗しました。もう一度お試しください。');
-        return;
       }
-      try { localStorage.setItem(TOKEN_KEY, idToken); } catch (e) {}
-      showApp(idToken);
       return;
     }
 
+    // ── Google認証から戻ってきた：エラーあり ────────────────────
     if (err) {
-      // ポップアップ内でエラーが返ってきた場合
-      if (window.opener && !window.opener.closed && typeof window.opener.onReauthComplete === 'function') {
-        window.opener.onReauthComplete(null);
-        window.close();
-        return;
+      history.replaceState(null, '', REDIRECT_URI);
+      try { sessionStorage.removeItem(NONCE_KEY); } catch (e) {}
+      if (INTERACTIVE_ERRORS.indexOf(err) !== -1) {
+        // サイレント更新できなかった＝本当にログインが必要。通常のログイン画面へ。
+        showLogin('');
+      } else {
+        showLogin('ログインできませんでした。もう一度お試しください。');
       }
-      showLogin('ログインがキャンセルされました。');
       return;
     }
 
-    // 保存済みトークンがあれば再利用（サーバ側で再検証される）
-    var saved = null;
-    try { saved = localStorage.getItem(TOKEN_KEY); } catch (e) {}
+    // ── 通常起動：保存済みトークンの状態で分岐 ──────────────────
+    var saved = savedToken();
     if (saved && !isExpired(saved)) {
       showApp(saved);
-    } else {
-      clearToken();
-      showLogin('');
+      return;
     }
+    if (saved) {
+      // 失効しているが、Googleログインが生きていれば無操作で更新できる
+      trySilentRefresh();
+      return;
+    }
+    // トークンなし → 手動ログイン
+    showLogin('');
   })();
 </script>
 </body>
