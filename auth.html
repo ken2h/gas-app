@@ -4,49 +4,62 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>ログイン</title>
-  <script src="https://accounts.google.com/gsi/client" async defer></script>
   <style>
     body { font-family: -apple-system, "Segoe UI", sans-serif; padding: 40px 20px; text-align: center; background: #f8f9fa; }
     .container { max-width: 360px; margin: 0 auto; background: white; padding: 32px 24px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); }
     h3 { margin: 0 0 16px; }
-    p { color: #666; font-size: 14px; margin: 0 0 24px; }
-    .signin-wrap { display: flex; justify-content: center; }
+    p { color: #666; font-size: 14px; margin: 0; }
   </style>
 </head>
 <body>
   <div class="container">
     <h3>ログイン</h3>
-    <p>Googleアカウントでログインしてください</p>
-
-    <div id="g_id_onload"
-         data-client_id="1026254309160-3milkdp5ju4d7g935j3e4e9kes4j0fr3.apps.googleusercontent.com"
-         data-callback="onCredential"
-         data-ux_mode="popup"
-         data-context="signin"
-         data-use_fedcm_for_prompt="true"
-         data-auto_prompt="false">
-    </div>
-    <div class="signin-wrap">
-      <div class="g_id_signin"
-           data-type="standard"
-           data-shape="rectangular"
-           data-theme="outline"
-           data-text="signin_with"
-           data-size="large"
-           data-logo_alignment="left">
-      </div>
-    </div>
+    <p id="msg">Googleにリダイレクトしています...</p>
   </div>
-
   <script>
-    function onCredential(response) {
-      if (response && response.credential && window.opener) {
-        window.opener.postMessage({
-          type: 'gsi-credential',
-          idToken: response.credential
-        }, '*');
+    var CLIENT_ID = '1026254309160-3milkdp5ju4d7g935j3e4e9kes4j0fr3.apps.googleusercontent.com';
+    var REDIRECT_URI = 'https://ken2h.github.io/gas-app/auth.html';
+
+    function getFragment() {
+      var h = location.hash.charAt(0) === '#' ? location.hash.slice(1) : location.hash;
+      return new URLSearchParams(h);
+    }
+
+    var params = getFragment();
+    var idToken = params.get('id_token');
+    var err = params.get('error');
+
+    if (idToken) {
+      // Googleから戻ってきた：nonceを照合して opener へ渡す
+      var savedNonce = sessionStorage.getItem('gsi_nonce');
+      sessionStorage.removeItem('gsi_nonce');
+      try {
+        var payload = JSON.parse(atob(idToken.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
+        if (!savedNonce || payload.nonce !== savedNonce) {
+          document.getElementById('msg').textContent = '認証エラー（nonce不一致）。閉じてやり直してください。';
+        } else if (window.opener) {
+          window.opener.postMessage({ type: 'gsi-credential', idToken: idToken }, '*');
+          window.close();
+        } else {
+          document.getElementById('msg').textContent = '元の画面が見つかりません。閉じてやり直してください。';
+        }
+      } catch (e) {
+        document.getElementById('msg').textContent = 'トークン解析に失敗しました。';
       }
-      window.close();
+    } else if (err) {
+      document.getElementById('msg').textContent = 'ログインがキャンセルされました（' + err + '）。';
+    } else {
+      // 認証開始：このウィンドウをそのままGoogleへ（トップレベル遷移）
+      var nonce = (Date.now().toString(36) + Math.random().toString(36).slice(2));
+      sessionStorage.setItem('gsi_nonce', nonce);
+      var url = 'https://accounts.google.com/o/oauth2/v2/auth'
+        + '?client_id=' + encodeURIComponent(CLIENT_ID)
+        + '&redirect_uri=' + encodeURIComponent(REDIRECT_URI)
+        + '&response_type=id_token'
+        + '&scope=' + encodeURIComponent('openid email profile')
+        + '&nonce=' + encodeURIComponent(nonce)
+        + '&prompt=select_account';
+      location.href = url;
     }
   </script>
 </body>
