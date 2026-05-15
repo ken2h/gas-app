@@ -26,6 +26,8 @@
   //     … prompt=none の全画面リダイレクトで「無操作」更新
   // ・iframe からの app-auth-expired、および失効2分前のタイマーで
   //   先回りしてサイレント更新する
+  // ・タブ復帰時(visibilitychange)と30秒ポーリングでも判定し、
+  //   バックグラウンド/スリープで setTimeout が止まっても取りこぼさない
   // ・直近 SILENT_COOLDOWN 内に戻ってきたら無限ループ回避で手動ログインへ
   var CLIENT_ID       = '1026254309160-3milkdp5ju4d7g935j3e4e9kes4j0fr3.apps.googleusercontent.com';
   var GAS_EXEC        = 'https://script.google.com/macros/s/AKfycbxyZUdN7H4_u1tTWGvza1mh2i2iKPaGzWZq7X7syZPU0TmZErPnNfy9sxRmsHL4Y_Ol/exec';
@@ -173,8 +175,11 @@
       trySilentRefresh();
     }
   });
+
   // タブをバックグラウンドにしたりPCがスリープすると setTimeout は止まる。
-  // タブ復帰時と 30 秒ポーリングでもトークンの残り時間を見て先回り更新する。
+  // タブ復帰時と30秒ポーリングでもトークンの残り時間を見て先回り更新する。
+  // trySilentRefresh 側に SILENT_COOLDOWN(60秒)の連投ガードがあるため、
+  // 短時間に何度呼ばれても安全。
   function checkSessionFreshness() {
     var token = savedToken();
     if (!token) return;
@@ -182,7 +187,6 @@
       var exp = decodeJwtPayload(token).exp;
       if (!exp) return;
       var remain = Number(exp) * 1000 - Date.now();
-      // 残り2分を切ったらサイレント更新（trySilentRefresh 側の cooldown で連打にはならない）
       if (remain < 2 * 60 * 1000) {
         trySilentRefresh();
       }
@@ -193,6 +197,7 @@
     if (document.visibilityState === 'visible') checkSessionFreshness();
   });
   setInterval(checkSessionFreshness, 30 * 1000);
+
   (function init() {
     var params  = parseHash();
     var idToken = params.get('id_token');
