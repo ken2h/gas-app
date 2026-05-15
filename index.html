@@ -173,7 +173,26 @@
       trySilentRefresh();
     }
   });
+  // タブをバックグラウンドにしたりPCがスリープすると setTimeout は止まる。
+  // タブ復帰時と 30 秒ポーリングでもトークンの残り時間を見て先回り更新する。
+  function checkSessionFreshness() {
+    var token = savedToken();
+    if (!token) return;
+    try {
+      var exp = decodeJwtPayload(token).exp;
+      if (!exp) return;
+      var remain = Number(exp) * 1000 - Date.now();
+      // 残り2分を切ったらサイレント更新（trySilentRefresh 側の cooldown で連打にはならない）
+      if (remain < 2 * 60 * 1000) {
+        trySilentRefresh();
+      }
+    } catch (e) {}
+  }
 
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState === 'visible') checkSessionFreshness();
+  });
+  setInterval(checkSessionFreshness, 30 * 1000);
   (function init() {
     var params  = parseHash();
     var idToken = params.get('id_token');
