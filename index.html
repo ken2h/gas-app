@@ -36,6 +36,7 @@
   var NONCE_KEY       = 'app_login_nonce';  // sessionStorage: 認証リダイレクトのnonce
   var SILENT_AT_KEY   = 'app_silent_at';    // sessionStorage: 直近のサイレント更新時刻
   var SILENT_COOLDOWN = 60000;              // この時間内に戻ってきたらサイレント更新は断念
+  var EST_KEY         = 'app_est_id';       // sessionStorage: QRスキャン時の見積ID保持
 
   // Google がサイレント認証を断ったときに返すエラー（＝ユーザー操作が必要）
   var INTERACTIVE_ERRORS = [
@@ -131,7 +132,12 @@
     document.body.innerHTML = '';
     var f = document.createElement('iframe');
     f.id = 'app-frame';
-    f.src = GAS_EXEC + '?token=' + encodeURIComponent(token);
+    var estId = '';
+    try { estId = sessionStorage.getItem(EST_KEY) || ''; sessionStorage.removeItem(EST_KEY); } catch(e) {}
+    var src = GAS_EXEC + '?token=' + encodeURIComponent(token)
+            + '&hub=' + encodeURIComponent(REDIRECT_URI);
+    if (estId) src += '&est=' + encodeURIComponent(estId);
+    f.src = src;
     document.body.appendChild(f);
 
     // 失効2分前に先回りでサイレント更新（iframe のオーバーレイが出る前に処理する）
@@ -199,6 +205,14 @@
   setInterval(checkSessionFreshness, 30 * 1000);
 
   (function init() {
+    // QRスキャン経由の ?est= をGoogleリダイレクト後も失わないようsessionStorageに退避
+    var urlSearch = new URLSearchParams(location.search);
+    var _estQr = urlSearch.get('est');
+    if (_estQr) {
+      try { sessionStorage.setItem(EST_KEY, _estQr); } catch(e) {}
+      history.replaceState(null, '', location.pathname + location.hash);
+    }
+
     var params  = parseHash();
     var idToken = params.get('id_token');
     var err     = params.get('error');
